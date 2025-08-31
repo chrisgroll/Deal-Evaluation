@@ -1,7 +1,8 @@
+
 import { useMemo, useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/Card";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/Tabs";
-import { Badge } from "./components/ui/Badge";
+import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
+import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
+import { Badge } from "./components/ui/badge";
 import { ResponsiveContainer, LineChart, Line, CartesianGrid, XAxis, YAxis, Tooltip, Legend } from "recharts";
 
 /** Calculation helpers (matches your economics) */
