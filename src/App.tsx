@@ -1,6 +1,7 @@
-import { useMemo, useState } from "react";
+// src/App.tsx
+import { useMemo, useState, type ChangeEvent } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "./components/ui/card";
-import { Tabs, TabsList, TabsTrigger, TabsContent } from "./components/ui/tabs";
+import { Tabs, TabsList, TabsTrigger } from "./components/ui/tabs";
 import { Badge } from "./components/ui/badge";
 import {
   LineChart,
@@ -13,315 +14,499 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
+/* ──────────────────────────────────────────────────────────────────────────────
+  Types
+────────────────────────────────────────────────────────────────────────────── */
 type Inputs = {
-  term: number;
-  arpu: number;
+  term: number; // months
+  amortTPMS: number; // months
+  amortOther: number; // months
   units: number;
-  upfrontPerUnit: number;
-  tpmsCapex: number;
-  otherCapex: number;
-  installCapex: number;
-  amortTP: number;
-  amortOT: number;
+  arpu: number; // $ per unit per month (recurring)
+  upfrontPerUnit: number; // $ per unit collected at start, amortized to revenue
+  // Capex (per unit)
+  capexTPMS: number;
+  capexOther: number;
+  capexInstall: number;
+  // Pure COGS per unit per month
   airtime: number;
   thirdParty: number;
-  mcf: number;
+  mcfLicense: number;
   people: number;
   warranty: number;
-  discountRate: number;
+  // Discount rate (annual)
+  discountRate: number; // e.g. 0.10 = 10%
 };
 
-const initial: Inputs = {
-  term: 36,
-  arpu: 20,
-  units: 100,
-  upfrontPerUnit: 100,
-  tpmsCapex: 80,
-  otherCapex: 70,
-  installCapex: 30,
-  amortTP: 24,
-  amortOT: 24,
-  airtime: 0.35,
-  thirdParty: 0.2,
-  mcf: 0.25,
-  people: 0.15,
-  warranty: 0.05,
-  discountRate: 0.10,
+type Row = {
+  month: number;
+  revenue: number;
+  cogs: number;
+  grossMargin: number;
+  depreciation: number; // capex amort through COGS (non-cash)
+  opex: number; // keep as zero for now (placeholder)
+  operatingProfit: number; // accrual
+  capexCash: number; // up-front cash outflow
+  upfrontCashIn: number; // up-front cash inflow at start
+  fcf: number;
+  cumFCF: number;
 };
 
-function dollars(n: number) {
-  return n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 0 });
+/* ──────────────────────────────────────────────────────────────────────────────
+  Helpers
+────────────────────────────────────────────────────────────────────────────── */
+const currency = (n: number) =>
+  n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
+
+const pct = (n: number) =>
+  (n * 100).toLocaleString(undefined, { maximumFractionDigits: 1 }) + "%";
+
+function irr(cashflows: number[], guess = 0.1): number | null {
+  // Simple Newton method IRR (monthly), then annualize
+  const maxIter = 100;
+  const eps = 1e-7;
+  let r = guess / 12; // monthly guess
+  for (let i = 0; i < maxIter; i++) {
+    let npv = 0;
+    let d = 0;
+    for (let t = 0; t < cashflows.length; t++) {
+      const cf = cashflows[t];
+      const denom = (1 + r) ** t;
+      npv += cf / denom;
+      d -= (t * cf) / (denom * (1 + r));
+    }
+    const newR = r - npv / d;
+    if (Number.isNaN(newR) || !Number.isFinite(newR)) return null;
+    if (Math.abs(newR - r) < eps) {
+      const annual = (1 + newR) ** 12 - 1;
+      return annual;
+    }
+    r = newR;
+  }
+  return null;
 }
 
-export default function App() {
-  const [tab, setTab] = useState("base");
-  const [inp, setInp] = useState<Inputs>(initial);
+function npv(cashflows: number[], annualDiscountRate: number): number {
+  const r = annualDiscountRate / 12; // monthly
+  let res = 0;
+  for (let t = 0; t < cashflows.length; t++) {
+    res += cashflows[t] / (1 + r) ** t;
+  }
+  return res;
+}
 
-  const {
-    monthly,
-    cumulative,
-    npv,
-    irr,
+/* ──────────────────────────────────────────────────────────────────────────────
+  Core calculations
+────────────────────────────────────────────────────────────────────────────── */
+function buildSchedule(i: Inputs): Row[] {
+  const rows: Row[] = [];
+  const term = i.term;
+
+  // capex totals (cash at M0)
+  const totalCapexPerUnit = i.capexTPMS + i.capexOther + i.capexInstall;
+  const capexTotal = totalCapexPerUnit * i.units;
+
+  // Upfront payment (cash in at M0) + amortized to revenue across amort periods (two buckets)
+  const upfrontTotal = i.upfrontPerUnit * i.units;
+
+  // Amortization (as non-cash expense in COGS) — spread capex across amort terms
+  const monthlyDepTPMS = (i.capexTPMS * i.units) / Math.max(1, i.amortTPMS);
+  const monthlyDepOther = (i.capexOther * i.units) / Math.max(1, i.amortOther);
+  const monthlyDepInstall = (i.capexInstall * i.units) / Math.max(1, i.amortOther); // assume "other" schedule
+
+  const monthlyAmortUpfrontTPMS = (i.upfrontPerUnit * i.units * 0.5) / Math.max(1, i.amortTPMS); // 50/50 split as example
+  const monthlyAmortUpfrontOther = (i.upfrontPerUnit * i.units * 0.5) / Math.max(1, i.amortOther);
+
+  // Pure monthly COGS per unit (cash + accrual), recognized monthly
+  const perUnitCOGS =
+    i.airtime + i.thirdParty + i.mcfLicense + i.people + i.warranty;
+
+  let cum = 0;
+  for (let m = 0; m <= term; m++) {
+    const isStart = m === 0;
+
+    const recurringRevenue = i.arpu * i.units;
+    const amortUpfront =
+      (m > 0 && m <= i.amortTPMS ? monthlyAmortUpfrontTPMS : 0) +
+      (m > 0 && m <= i.amortOther ? monthlyAmortUpfrontOther : 0);
+
+    const revenue = m === 0 ? 0 : recurringRevenue + amortUpfront;
+
+    const dep =
+      (m > 0 && m <= i.amortTPMS ? monthlyDepTPMS : 0) +
+      (m > 0 && m <= i.amortOther ? monthlyDepOther + monthlyDepInstall : 0);
+
+    const cogsCash = m > 0 ? perUnitCOGS * i.units : 0;
+    const cogs = cogsCash + dep;
+
+    const grossMargin = revenue - cogs;
+    const opex = 0;
+    const operatingProfit = grossMargin - opex;
+
+    // Cash effects
+    const capexCash = isStart ? capexTotal : 0;
+    const upfrontCashIn = isStart ? upfrontTotal : 0;
+
+    const fcf = operatingProfit + dep - capexCash + upfrontCashIn - 0 /*ΔNWC*/;
+
+    cum += fcf;
+
+    rows.push({
+      month: m,
+      revenue,
+      cogs,
+      grossMargin,
+      depreciation: dep,
+      opex,
+      operatingProfit,
+      capexCash,
+      upfrontCashIn,
+      fcf,
+      cumFCF: cum,
+    });
+  }
+  return rows;
+}
+
+function keyMetrics(rows: Row[], discountRate: number) {
+  const cf = rows.map((r) => r.fcf);
+  const _npv = npv(cf, discountRate);
+  const _irr = irr(cf) ?? null;
+
+  // payback
+  let payback: number | null = null;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].cumFCF >= 0) {
+      payback = i;
+      break;
+    }
+  }
+
+  // gross margin %
+  const sumRev = rows.reduce((a, r) => a + r.revenue, 0);
+  const sumCOGS = rows.reduce((a, r) => a + r.cogs, 0);
+  const gmPct = sumRev > 0 ? (sumRev - sumCOGS) / sumRev : 0;
+
+  return {
+    npv: _npv,
+    irr: _irr,
     payback,
-    grossMargin,
-    pnl,
-  } = useMemo(() => computeDeal(inp), [inp]);
-
-  const chartData = useMemo(
-    () =>
-      monthly.map((m, i) => ({
-        m: `M${i + 1}`,
-        fcf: m,
-        cum: cumulative[i],
-      })),
-    [monthly, cumulative]
-  );
-
-  return (
-    <div className="min-h-screen bg-gray-50 p-6">
-      <div className="mx-auto max-w-7xl">
-        <div className="mb-6 flex items-center justify-between">
-          <h1 className="text-2xl font-bold text-gray-900">
-            Enterprise Deal Economics <Badge>v1.2</Badge>
-          </h1>
-          <Tabs value={tab} onValueChange={setTab}>
-            <TabsList>
-              <TabsTrigger value="base">Base Case</TabsTrigger>
-              <TabsTrigger value="scenario">Scenario</TabsTrigger>
-            </TabsList>
-          </Tabs>
-        </div>
-
-        <div className="grid grid-cols-1 gap-6 md:grid-cols-3">
-          {/* Inputs */}
-          <Card className="md:col-span-1">
-            <CardHeader>
-              <CardTitle>Inputs — Base Case</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-4">
-              <Section label="Contract">
-                <Number label="Term (months)" value={inp.term} onChange={(v) => setInp({ ...inp, term: v })} />
-                <div className="grid grid-cols-2 gap-3">
-                  <Number label="TPMS amortization (mo)" value={inp.amortTP} onChange={(v) => setInp({ ...inp, amortTP: v })} />
-                  <Number label="Other HW amortization (mo)" value={inp.amortOT} onChange={(v) => setInp({ ...inp, amortOT: v })} />
-                </div>
-                <Number label="Units" value={inp.units} onChange={(v) => setInp({ ...inp, units: v })} />
-                <Number label="ARPU ($/unit/mo)" value={inp.arpu} onChange={(v) => setInp({ ...inp, arpu: v })} />
-                <Number label="Upfront payment per unit ($)" value={inp.upfrontPerUnit} onChange={(v) => setInp({ ...inp, upfrontPerUnit: v })} />
-              </Section>
-
-              <Section label="Capex (per unit)">
-                <Number label="TPMS capex ($/unit)" value={inp.tpmsCapex} onChange={(v) => setInp({ ...inp, tpmsCapex: v })} />
-                <Number label="Other HW capex ($/unit)" value={inp.otherCapex} onChange={(v) => setInp({ ...inp, otherCapex: v })} />
-                <Number label="Install capex ($/unit)" value={inp.installCapex} onChange={(v) => setInp({ ...inp, installCapex: v })} />
-              </Section>
-
-              <Section label="COGS ($/unit/mo)">
-                <div className="grid grid-cols-2 gap-3">
-                  <Number label="Airtime/data" value={inp.airtime} step={0.01} onChange={(v) => setInp({ ...inp, airtime: v })} />
-                  <Number label="3P license" value={inp.thirdParty} step={0.01} onChange={(v) => setInp({ ...inp, thirdParty: v })} />
-                  <Number label="MCF license" value={inp.mcf} step={0.01} onChange={(v) => setInp({ ...inp, mcf: v })} />
-                  <Number label="People" value={inp.people} step={0.01} onChange={(v) => setInp({ ...inp, people: v })} />
-                  <Number label="Warranty" value={inp.warranty} step={0.01} onChange={(v) => setInp({ ...inp, warranty: v })} />
-                </div>
-              </Section>
-
-              <Section label="Finance">
-                <Number label="Discount rate (annual %)" value={inp.discountRate * 100} step={0.5}
-                  onChange={(v) => setInp({ ...inp, discountRate: v / 100 })} />
-              </Section>
-            </CardContent>
-          </Card>
-
-          {/* Metrics */}
-          <Card className="md:col-span-1">
-            <CardHeader>
-              <CardTitle>Base Case</CardTitle>
-            </CardHeader>
-            <CardContent className="space-y-3 text-sm">
-              <Row label="NPV" value={dollars(npv)} />
-              <Row label="IRR (annual)" value={`${(irr * 100).toFixed(2)}%`} />
-              <Row label="Cumulative FCF" value={dollars(cumulative[cumulative.length - 1])} />
-              <Row label="Payback" value={`${payback ?? "—"} mo`} />
-              <Row label="Gross Margin" value={`${(grossMargin * 100).toFixed(1)}%`} />
-            </CardContent>
-          </Card>
-
-          {/* Chart */}
-          <Card className="md:col-span-1">
-            <CardHeader>
-              <CardTitle>Free Cash Flow — Monthly & Cumulative</CardTitle>
-            </CardHeader>
-            <CardContent className="h-72">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={chartData}>
-                  <CartesianGrid strokeDasharray="3 3" />
-                  <XAxis dataKey="m" />
-                  <YAxis />
-                  <Tooltip />
-                  <Legend />
-                  <Line type="monotone" dataKey="cum" name="Cumulative" stroke="#2563eb" strokeWidth={2} dot={false} />
-                  <Line type="monotone" dataKey="fcf" name="FCF" stroke="#16a34a" strokeWidth={2} dot={false} />
-                </LineChart>
-              </ResponsiveContainer>
-            </CardContent>
-          </Card>
-        </div>
-
-        {/* P&L table */}
-        <Card className="mt-6">
-          <CardHeader>
-            <CardTitle>Monthly P&L (accrual) & FCF</CardTitle>
-          </CardHeader>
-          <CardContent className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="text-left text-gray-500">
-                  <th className="py-2 pr-3">Line</th>
-                  {Array.from({ length: inp.term }, (_, i) => (
-                    <th key={i} className="py-2 pr-3">M{i + 1}</th>
-                  ))}
-                </tr>
-              </thead>
-              <tbody className="[&>tr:nth-child(odd)]:bg-gray-50">
-                {pnl.map((row) => (
-                  <tr key={row.name}>
-                    <td className="py-2 pr-3 font-medium">{row.name}</td>
-                    {row.values.map((v, i) => (
-                      <td key={i} className="py-2 pr-3 tabular-nums">{dollars(v)}</td>
-                    ))}
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </CardContent>
-        </Card>
-      </div>
-    </div>
-  );
+    cumulativeFCF: rows[rows.length - 1]?.cumFCF ?? 0,
+    grossMarginPct: gmPct,
+  };
 }
 
-/* ---------- Small UI helpers ---------- */
-function Section({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="space-y-2">
-      <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">{label}</div>
-      {children}
-    </div>
-  );
-}
-
-function Number({
+/* ──────────────────────────────────────────────────────────────────────────────
+  UI building blocks
+────────────────────────────────────────────────────────────────────────────── */
+function NumberInput({
   label,
   value,
-  onChange,
   step = 1,
+  onChange,
+  suffix,
 }: {
   label: string;
   value: number;
   step?: number;
   onChange: (v: number) => void;
+  suffix?: string;
 }) {
   return (
-    <label className="block">
-      <span className="block text-xs text-gray-600">{label}</span>
+    <div>
+      <label className="block text-sm font-medium text-gray-700">
+        {label} {suffix ? <span className="text-gray-400">{suffix}</span> : null}
+      </label>
       <input
         type="number"
         step={step}
         value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        onChange={(e: ChangeEvent<HTMLInputElement>) =>
+          onChange(Number(e.target.value))
+        }
         className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none"
       />
-    </label>
-  );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-gray-600">{label}</span>
-      <span className="font-semibold text-gray-900">{value}</span>
     </div>
   );
 }
 
-/* ---------- Core finance ---------- */
+/* ──────────────────────────────────────────────────────────────────────────────
+  App
+────────────────────────────────────────────────────────────────────────────── */
+export default function App() {
+  const [tab, setTab] = useState<"base">("base");
 
-function computeDeal(inp: Inputs) {
-  const months = inp.term;
-  const units = inp.units;
+  const [inp, setInp] = useState<Inputs>({
+    term: 36,
+    amortTPMS: 24,
+    amortOther: 24,
+    units: 100,
+    arpu: 20,
+    upfrontPerUnit: 100,
+    capexTPMS: 80,
+    capexOther: 70,
+    capexInstall: 30,
+    airtime: 0.35,
+    thirdParty: 0.2,
+    mcfLicense: 0.25,
+    people: 0.15,
+    warranty: 0.05,
+    discountRate: 0.1,
+  });
 
-  // Capex totals
-  const tpmsTotal = inp.tpmsCapex * units;
-  const otherTotal = inp.otherCapex * units;
-  const installTotal = inp.installCapex * units;
+  const rows = useMemo(() => buildSchedule(inp), [inp]);
+  const metrics = useMemo(() => keyMetrics(rows, inp.discountRate), [rows, inp]);
 
-  const upfrontCash = inp.upfrontPerUnit * units;
-
-  // Depreciation / amortization (COGS expensing of capex)
-  const depTP = tpmsTotal / Math.max(1, inp.amortTP);
-  const depOT = (otherTotal + installTotal) / Math.max(1, inp.amortOT);
-
-  const rev = Array(months).fill(inp.arpu * units);
-  const cogsRecurringPerUnit = inp.airtime + inp.thirdParty + inp.mcf + inp.people + inp.warranty;
-  const cogsRecurring = Array(months).fill(cogsRecurringPerUnit * units);
-
-  const cogsAmort = Array(months).fill(0).map((_, i) =>
-    (i < inp.amortTP ? depTP : 0) + (i < inp.amortOT ? depOT : 0)
+  const chartData = useMemo(
+    () =>
+      rows.map((r) => ({
+        monthLabel: `M${r.month}`,
+        fcf: Math.round(r.fcf),
+        cumulative: Math.round(r.cumFCF),
+      })),
+    [rows]
   );
 
-  const cogs = cogsRecurring.map((v, i) => v + cogsAmort[i]);
-  const grossProfit = cogs.map((v, i) => rev[i] - v);
-  const grossMargin =
-    grossProfit.reduce((a, b) => a + b, 0) / Math.max(1, rev.reduce((a, b) => a + b, 0));
+  return (
+    <div className="min-h-screen bg-gray-50 p-6">
+      {/* Header */}
+      <div className="mb-6 flex items-center justify-between">
+        <h1 className="text-2xl font-bold">
+          Enterprise Deal Economics <Badge>v1.2</Badge>
+        </h1>
+      </div>
 
-  // Accrual operating profit (no OpEx beyond COGS in this simple model)
-  const op = grossProfit.slice();
+      {/* Tabs (single value kept for future scenarios) */}
+      <Tabs value={tab} onValueChange={(v) => setTab(v as "base")} className="mb-4">
+        <TabsList>
+          <TabsTrigger value="base">Base Case</TabsTrigger>
+        </TabsList>
+      </Tabs>
 
-  // FCF = operating profit + depreciation addback - capex cash + upfront cash (month 1)
-  // Here depreciation addback = amortized capex
-  const depAddback = cogsAmort;
-  const capexCash = Array(months).fill(0);
-  capexCash[0] = -(tpmsTotal + otherTotal + installTotal); // upfront cash outflow
+      {/* Main grid */}
+      <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
+        {/* LEFT — Inputs */}
+        <Card className="lg:col-span-1">
+          <CardHeader>
+            <CardTitle>Inputs — Base Case</CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-5">
+            <div className="grid grid-cols-2 gap-4">
+              <NumberInput
+                label="Term"
+                suffix="mo"
+                value={inp.term}
+                onChange={(v) => setInp((s) => ({ ...s, term: v }))}
+              />
+              <NumberInput
+                label="Units"
+                value={inp.units}
+                onChange={(v) => setInp((s) => ({ ...s, units: v }))}
+              />
+              <NumberInput
+                label="ARPU"
+                suffix="$/unit/mo"
+                step={0.01}
+                value={inp.arpu}
+                onChange={(v) => setInp((s) => ({ ...s, arpu: v }))}
+              />
+              <NumberInput
+                label="Upfront payment per unit"
+                suffix="$"
+                step={1}
+                value={inp.upfrontPerUnit}
+                onChange={(v) => setInp((s) => ({ ...s, upfrontPerUnit: v }))}
+              />
 
-  const monthly = op.map((v, i) => v + depAddback[i] + capexCash[i] + (i === 0 ? upfrontCash : 0));
-  const cumulative = monthly.reduce<number[]>((acc, cur) => {
-    acc.push((acc[acc.length - 1] ?? 0) + cur);
-    return acc;
-  }, []);
+              <NumberInput
+                label="TPMS amortization"
+                suffix="mo"
+                value={inp.amortTPMS}
+                onChange={(v) => setInp((s) => ({ ...s, amortTPMS: v }))}
+              />
+              <NumberInput
+                label="Other HW amortization"
+                suffix="mo"
+                value={inp.amortOther}
+                onChange={(v) => setInp((s) => ({ ...s, amortOther: v }))}
+              />
 
-  // Payback month (first month cumulative turns positive)
-  const payIdx = cumulative.findIndex((x) => x >= 0);
-  const payback = payIdx === -1 ? undefined : payIdx + 1;
+              <NumberInput
+                label="TPMS capex"
+                suffix="$/unit"
+                value={inp.capexTPMS}
+                onChange={(v) => setInp((s) => ({ ...s, capexTPMS: v }))}
+              />
+              <NumberInput
+                label="Other HW capex"
+                suffix="$/unit"
+                value={inp.capexOther}
+                onChange={(v) => setInp((s) => ({ ...s, capexOther: v }))}
+              />
+              <NumberInput
+                label="Install capex"
+                suffix="$/unit"
+                value={inp.capexInstall}
+                onChange={(v) => setInp((s) => ({ ...s, capexInstall: v }))}
+              />
 
-  // NPV / IRR on monthly cash flows (discount rate annual -> monthly)
-  const rMonthly = Math.pow(1 + inp.discountRate, 1 / 12) - 1;
-  const npv =
-    monthly.reduce((s, cf, i) => s + cf / Math.pow(1 + rMonthly, i + 1), 0);
+              <NumberInput
+                label="Airtime/data"
+                suffix="$/unit/mo"
+                step={0.01}
+                value={inp.airtime}
+                onChange={(v) => setInp((s) => ({ ...s, airtime: v }))}
+              />
+              <NumberInput
+                label="3P license"
+                suffix="$/unit/mo"
+                step={0.01}
+                value={inp.thirdParty}
+                onChange={(v) => setInp((s) => ({ ...s, thirdParty: v }))}
+              />
+              <NumberInput
+                label="MCF license"
+                suffix="$/unit/mo"
+                step={0.01}
+                value={inp.mcfLicense}
+                onChange={(v) => setInp((s) => ({ ...s, mcfLicense: v }))}
+              />
+              <NumberInput
+                label="People"
+                suffix="$/unit/mo"
+                step={0.01}
+                value={inp.people}
+                onChange={(v) => setInp((s) => ({ ...s, people: v }))}
+              />
+              <NumberInput
+                label="Warranty"
+                suffix="$/unit/mo"
+                step={0.01}
+                value={inp.warranty}
+                onChange={(v) => setInp((s) => ({ ...s, warranty: v }))}
+              />
+              <NumberInput
+                label="Discount rate"
+                suffix="% annual"
+                step={0.01}
+                value={Math.round(inp.discountRate * 10000) / 100}
+                onChange={(v) => setInp((s) => ({ ...s, discountRate: v / 100 }))}
+              />
+            </div>
+          </CardContent>
+        </Card>
 
-  // Simple IRR via bisection on monthly basis
-  const irrMonthly = solveIRR(monthly);
-  const irr = Math.pow(1 + irrMonthly, 12) - 1;
+        {/* RIGHT — Metrics + Chart */}
+        <div className="lg:col-span-2 space-y-6">
+          {/* Metrics */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Base Case</CardTitle>
+            </CardHeader>
+            <CardContent className="grid grid-cols-2 gap-6 md:grid-cols-5">
+              <div>
+                <div className="text-xs text-gray-500">NPV</div>
+                <div className="text-base font-semibold">{currency(metrics.npv)}</div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">IRR (annual)</div>
+                <div className="text-base font-semibold">
+                  {metrics.irr == null ? "—" : pct(metrics.irr)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">Cumulative FCF</div>
+                <div className="text-base font-semibold">
+                  {currency(metrics.cumulativeFCF)}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">Payback</div>
+                <div className="text-base font-semibold">
+                  {metrics.payback == null ? "—" : `${metrics.payback} mo`}
+                </div>
+              </div>
+              <div>
+                <div className="text-xs text-gray-500">Gross Margin</div>
+                <div className="text-base font-semibold">{pct(metrics.grossMarginPct)}</div>
+              </div>
+            </CardContent>
+          </Card>
 
-  // P&L lines
-  const pnl = [
-    { name: "Revenue", values: rev },
-    { name: "COGS (recurring)", values: cogsRecurring },
-    { name: "COGS (amortization)", values: cogsAmort },
-    { name: "Gross Profit", values: grossProfit },
-    { name: "Operating Profit", values: op },
-    { name: "FCF", values: monthly },
-  ];
+          {/* Chart */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Free Cash Flow — Monthly &amp; Cumulative</CardTitle>
+            </CardHeader>
+            <CardContent className="h-72">
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={chartData}>
+                  <CartesianGrid strokeDasharray="3 3" />
+                  <XAxis dataKey="monthLabel" />
+                  <YAxis />
+                  <Tooltip />
+                  <Legend />
+                  <Line
+                    type="monotone"
+                    dataKey="cumulative"
+                    name="Cumulative"
+                    stroke="#2563eb"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                  <Line
+                    type="monotone"
+                    dataKey="fcf"
+                    name="FCF"
+                    stroke="#16a34a"
+                    strokeWidth={2}
+                    dot={false}
+                  />
+                </LineChart>
+              </ResponsiveContainer>
+            </CardContent>
+          </Card>
 
-  return { monthly, cumulative, npv, irr, payback, grossMargin, pnl };
-}
-
-function solveIRR(flows: number[]) {
-  let lo = -0.9, hi = 1.0;
-  for (let k = 0; k < 60; k++) {
-    const mid = (lo + hi) / 2;
-    const npv = flows.reduce((s, cf, i) => s + cf / Math.pow(1 + mid, i + 1), 0);
-    if (npv > 0) lo = mid; else hi = mid;
-  }
-  return (lo + hi) / 2;
+          {/* Monthly P&L (Accrual) + FCF */}
+          <Card>
+            <CardHeader>
+              <CardTitle>Monthly P&amp;L (accrual) &amp; FCF</CardTitle>
+            </CardHeader>
+            <CardContent className="overflow-x-auto">
+              <table className="min-w-full text-sm">
+                <thead>
+                  <tr className="text-left text-gray-500">
+                    <th className="py-2 pr-4">Month</th>
+                    <th className="py-2 pr-4">Revenue</th>
+                    <th className="py-2 pr-4">COGS</th>
+                    <th className="py-2 pr-4">Gross Margin</th>
+                    <th className="py-2 pr-4">Depreciation</th>
+                    <th className="py-2 pr-4">Op Profit</th>
+                    <th className="py-2 pr-4">Capex (Cash)</th>
+                    <th className="py-2 pr-4">Upfront Cash</th>
+                    <th className="py-2 pr-0">FCF</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {rows.map((r) => (
+                    <tr key={r.month} className="border-t">
+                      <td className="py-2 pr-4">M{r.month}</td>
+                      <td className="py-2 pr-4">{currency(r.revenue)}</td>
+                      <td className="py-2 pr-4">{currency(r.cogs)}</td>
+                      <td className="py-2 pr-4">{currency(r.grossMargin)}</td>
+                      <td className="py-2 pr-4">{currency(r.depreciation)}</td>
+                      <td className="py-2 pr-4">{currency(r.operatingProfit)}</td>
+                      <td className="py-2 pr-4">{currency(r.capexCash)}</td>
+                      <td className="py-2 pr-4">{currency(r.upfrontCashIn)}</td>
+                      <td className="py-2 pr-0 font-medium">{currency(r.fcf)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </CardContent>
+          </Card>
+        </div>
+      </div>
+    </div>
+  );
 }
