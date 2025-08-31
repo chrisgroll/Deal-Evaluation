@@ -2,5 +2,5 @@
 @tailwind components;
 @tailwind utilities;
 
-/* Optional: small polish */
+/* Optional small polish */
 :root { color-scheme: light; }
