@@ -1,6 +1,7 @@
-import React from "react";
+import React, { createContext, useContext } from "react";
 
-const TabsCtx = React.createContext<{ value: string; setValue: (v: string) => void } | null>(null);
+type TabsCtx = { value: string; onChange: (v: string) => void };
+const Ctx = createContext<TabsCtx | null>(null);
 
 export function Tabs({
   value,
@@ -11,23 +12,22 @@ export function Tabs({
   onValueChange: (v: string) => void;
   children: React.ReactNode;
 }) {
-  // consume props so TS doesn't flag them as unused
-  const ctxValue = React.useMemo(() => ({ value, setValue: onValueChange }), [value, onValueChange]);
-  return <TabsCtx.Provider value={ctxValue}>{children}</TabsCtx.Provider>;
+  return <Ctx.Provider value={{ value, onChange: onValueChange }}>{children}</Ctx.Provider>;
 }
 
-export function TabsList({ children, className = "" }: { children: React.ReactNode; className?: string }) {
-  return <div className={`flex gap-2 border-b p-2 ${className}`}>{children}</div>;
+export function TabsList({ children }: { children: React.ReactNode }) {
+  return <div className="tabs">{children}</div>;
 }
 
 export function TabsTrigger({ value, children }: { value: string; children: React.ReactNode }) {
-  const ctx = React.useContext(TabsCtx)!;
+  const ctx = useContext(Ctx)!;
   const active = ctx.value === value;
   return (
     <button
+      className="tab-btn"
+      data-active={active ? "true" : "false"}
+      onClick={() => ctx.onChange(value)}
       type="button"
-      className={`rounded-xl px-3 py-1 text-sm ${active ? "bg-black text-white" : "hover:bg-gray-100"}`}
-      onClick={() => ctx.setValue(value)}
     >
       {children}
     </button>
@@ -35,7 +35,7 @@ export function TabsTrigger({ value, children }: { value: string; children: Reac
 }
 
 export function TabsContent({ value, children }: { value: string; children: React.ReactNode }) {
-  const ctx = React.useContext(TabsCtx)!;
+  const ctx = useContext(Ctx)!;
   if (ctx.value !== value) return null;
-  return <div className="pt-3">{children}</div>;
+  return <div className="mt-4">{children}</div>;
 }
