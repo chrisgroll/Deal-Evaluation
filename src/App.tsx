@@ -14,28 +14,22 @@ import {
   ResponsiveContainer,
 } from "recharts";
 
-/* ──────────────────────────────────────────────────────────────────────────────
-  Types
-────────────────────────────────────────────────────────────────────────────── */
 type Inputs = {
-  term: number; // months
-  amortTPMS: number; // months
-  amortOther: number; // months
+  term: number;
+  amortTPMS: number;
+  amortOther: number;
   units: number;
-  arpu: number; // $ per unit per month (recurring)
-  upfrontPerUnit: number; // $ per unit collected at start, amortized to revenue
-  // Capex (per unit)
+  arpu: number;
+  upfrontPerUnit: number;
   capexTPMS: number;
   capexOther: number;
   capexInstall: number;
-  // Pure COGS per unit per month
   airtime: number;
   thirdParty: number;
   mcfLicense: number;
   people: number;
   warranty: number;
-  // Discount rate (annual)
-  discountRate: number; // e.g. 0.10 = 10%
+  discountRate: number;
 };
 
 type Row = {
@@ -43,18 +37,15 @@ type Row = {
   revenue: number;
   cogs: number;
   grossMargin: number;
-  depreciation: number; // capex amort through COGS (non-cash)
-  opex: number; // keep as zero for now (placeholder)
-  operatingProfit: number; // accrual
-  capexCash: number; // up-front cash outflow
-  upfrontCashIn: number; // up-front cash inflow at start
+  depreciation: number;
+  opex: number;
+  operatingProfit: number;
+  capexCash: number;
+  upfrontCashIn: number;
   fcf: number;
   cumFCF: number;
 };
 
-/* ──────────────────────────────────────────────────────────────────────────────
-  Helpers
-────────────────────────────────────────────────────────────────────────────── */
 const currency = (n: number) =>
   n.toLocaleString(undefined, { style: "currency", currency: "USD", maximumFractionDigits: 2 });
 
@@ -62,10 +53,9 @@ const pct = (n: number) =>
   (n * 100).toLocaleString(undefined, { maximumFractionDigits: 1 }) + "%";
 
 function irr(cashflows: number[], guess = 0.1): number | null {
-  // Simple Newton method IRR (monthly), then annualize
   const maxIter = 100;
   const eps = 1e-7;
-  let r = guess / 12; // monthly guess
+  let r = guess / 12;
   for (let i = 0; i < maxIter; i++) {
     let npv = 0;
     let d = 0;
@@ -87,7 +77,7 @@ function irr(cashflows: number[], guess = 0.1): number | null {
 }
 
 function npv(cashflows: number[], annualDiscountRate: number): number {
-  const r = annualDiscountRate / 12; // monthly
+  const r = annualDiscountRate / 12;
   let res = 0;
   for (let t = 0; t < cashflows.length; t++) {
     res += cashflows[t] / (1 + r) ** t;
@@ -95,31 +85,22 @@ function npv(cashflows: number[], annualDiscountRate: number): number {
   return res;
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-  Core calculations
-────────────────────────────────────────────────────────────────────────────── */
 function buildSchedule(i: Inputs): Row[] {
   const rows: Row[] = [];
   const term = i.term;
 
-  // capex totals (cash at M0)
   const totalCapexPerUnit = i.capexTPMS + i.capexOther + i.capexInstall;
   const capexTotal = totalCapexPerUnit * i.units;
-
-  // Upfront payment (cash in at M0) + amortized to revenue across amort periods (two buckets)
   const upfrontTotal = i.upfrontPerUnit * i.units;
 
-  // Amortization (as non-cash expense in COGS) — spread capex across amort terms
   const monthlyDepTPMS = (i.capexTPMS * i.units) / Math.max(1, i.amortTPMS);
   const monthlyDepOther = (i.capexOther * i.units) / Math.max(1, i.amortOther);
-  const monthlyDepInstall = (i.capexInstall * i.units) / Math.max(1, i.amortOther); // assume "other" schedule
+  const monthlyDepInstall = (i.capexInstall * i.units) / Math.max(1, i.amortOther);
 
-  const monthlyAmortUpfrontTPMS = (i.upfrontPerUnit * i.units * 0.5) / Math.max(1, i.amortTPMS); // 50/50 split as example
+  const monthlyAmortUpfrontTPMS = (i.upfrontPerUnit * i.units * 0.5) / Math.max(1, i.amortTPMS);
   const monthlyAmortUpfrontOther = (i.upfrontPerUnit * i.units * 0.5) / Math.max(1, i.amortOther);
 
-  // Pure monthly COGS per unit (cash + accrual), recognized monthly
-  const perUnitCOGS =
-    i.airtime + i.thirdParty + i.mcfLicense + i.people + i.warranty;
+  const perUnitCOGS = i.airtime + i.thirdParty + i.mcfLicense + i.people + i.warranty;
 
   let cum = 0;
   for (let m = 0; m <= term; m++) {
@@ -143,11 +124,10 @@ function buildSchedule(i: Inputs): Row[] {
     const opex = 0;
     const operatingProfit = grossMargin - opex;
 
-    // Cash effects
     const capexCash = isStart ? capexTotal : 0;
     const upfrontCashIn = isStart ? upfrontTotal : 0;
 
-    const fcf = operatingProfit + dep - capexCash + upfrontCashIn - 0 /*ΔNWC*/;
+    const fcf = operatingProfit + dep - capexCash + upfrontCashIn;
 
     cum += fcf;
 
@@ -173,7 +153,6 @@ function keyMetrics(rows: Row[], discountRate: number) {
   const _npv = npv(cf, discountRate);
   const _irr = irr(cf) ?? null;
 
-  // payback
   let payback: number | null = null;
   for (let i = 0; i < rows.length; i++) {
     if (rows[i].cumFCF >= 0) {
@@ -182,7 +161,6 @@ function keyMetrics(rows: Row[], discountRate: number) {
     }
   }
 
-  // gross margin %
   const sumRev = rows.reduce((a, r) => a + r.revenue, 0);
   const sumCOGS = rows.reduce((a, r) => a + r.cogs, 0);
   const gmPct = sumRev > 0 ? (sumRev - sumCOGS) / sumRev : 0;
@@ -196,9 +174,6 @@ function keyMetrics(rows: Row[], discountRate: number) {
   };
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-  UI building blocks
-────────────────────────────────────────────────────────────────────────────── */
 function NumberInput({
   label,
   value,
@@ -221,18 +196,13 @@ function NumberInput({
         type="number"
         step={step}
         value={value}
-        onChange={(e: ChangeEvent<HTMLInputElement>) =>
-          onChange(Number(e.target.value))
-        }
+        onChange={(e: ChangeEvent<HTMLInputElement>) => onChange(Number(e.target.value))}
         className="mt-1 w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm shadow-sm focus:border-blue-500 focus:outline-none"
       />
     </div>
   );
 }
 
-/* ──────────────────────────────────────────────────────────────────────────────
-  App
-────────────────────────────────────────────────────────────────────────────── */
 export default function App() {
   const [tab, setTab] = useState<"base">("base");
 
@@ -269,171 +239,61 @@ export default function App() {
 
   return (
     <div className="min-h-screen bg-gray-50 p-6">
-      {/* Header */}
       <div className="mb-6 flex items-center justify-between">
         <h1 className="text-2xl font-bold">
           Enterprise Deal Economics <Badge>v1.2</Badge>
         </h1>
       </div>
 
-      {/* Tabs (single value kept for future scenarios) */}
-      <Tabs value={tab} onValueChange={(v) => setTab(v as "base")} className="mb-4">
-        <TabsList>
-          <TabsTrigger value="base">Base Case</TabsTrigger>
-        </TabsList>
-      </Tabs>
+      {/* Wrap Tabs to apply margin — Tabs doesn’t accept className */}
+      <div className="mb-4">
+        <Tabs value={tab} onValueChange={(v) => setTab(v as "base")}>
+          <TabsList>
+            <TabsTrigger value="base">Base Case</TabsTrigger>
+          </TabsList>
+        </Tabs>
+      </div>
 
-      {/* Main grid */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* LEFT — Inputs */}
         <Card className="lg:col-span-1">
           <CardHeader>
             <CardTitle>Inputs — Base Case</CardTitle>
           </CardHeader>
           <CardContent className="space-y-5">
             <div className="grid grid-cols-2 gap-4">
-              <NumberInput
-                label="Term"
-                suffix="mo"
-                value={inp.term}
-                onChange={(v) => setInp((s) => ({ ...s, term: v }))}
-              />
-              <NumberInput
-                label="Units"
-                value={inp.units}
-                onChange={(v) => setInp((s) => ({ ...s, units: v }))}
-              />
-              <NumberInput
-                label="ARPU"
-                suffix="$/unit/mo"
-                step={0.01}
-                value={inp.arpu}
-                onChange={(v) => setInp((s) => ({ ...s, arpu: v }))}
-              />
-              <NumberInput
-                label="Upfront payment per unit"
-                suffix="$"
-                step={1}
-                value={inp.upfrontPerUnit}
-                onChange={(v) => setInp((s) => ({ ...s, upfrontPerUnit: v }))}
-              />
-
-              <NumberInput
-                label="TPMS amortization"
-                suffix="mo"
-                value={inp.amortTPMS}
-                onChange={(v) => setInp((s) => ({ ...s, amortTPMS: v }))}
-              />
-              <NumberInput
-                label="Other HW amortization"
-                suffix="mo"
-                value={inp.amortOther}
-                onChange={(v) => setInp((s) => ({ ...s, amortOther: v }))}
-              />
-
-              <NumberInput
-                label="TPMS capex"
-                suffix="$/unit"
-                value={inp.capexTPMS}
-                onChange={(v) => setInp((s) => ({ ...s, capexTPMS: v }))}
-              />
-              <NumberInput
-                label="Other HW capex"
-                suffix="$/unit"
-                value={inp.capexOther}
-                onChange={(v) => setInp((s) => ({ ...s, capexOther: v }))}
-              />
-              <NumberInput
-                label="Install capex"
-                suffix="$/unit"
-                value={inp.capexInstall}
-                onChange={(v) => setInp((s) => ({ ...s, capexInstall: v }))}
-              />
-
-              <NumberInput
-                label="Airtime/data"
-                suffix="$/unit/mo"
-                step={0.01}
-                value={inp.airtime}
-                onChange={(v) => setInp((s) => ({ ...s, airtime: v }))}
-              />
-              <NumberInput
-                label="3P license"
-                suffix="$/unit/mo"
-                step={0.01}
-                value={inp.thirdParty}
-                onChange={(v) => setInp((s) => ({ ...s, thirdParty: v }))}
-              />
-              <NumberInput
-                label="MCF license"
-                suffix="$/unit/mo"
-                step={0.01}
-                value={inp.mcfLicense}
-                onChange={(v) => setInp((s) => ({ ...s, mcfLicense: v }))}
-              />
-              <NumberInput
-                label="People"
-                suffix="$/unit/mo"
-                step={0.01}
-                value={inp.people}
-                onChange={(v) => setInp((s) => ({ ...s, people: v }))}
-              />
-              <NumberInput
-                label="Warranty"
-                suffix="$/unit/mo"
-                step={0.01}
-                value={inp.warranty}
-                onChange={(v) => setInp((s) => ({ ...s, warranty: v }))}
-              />
-              <NumberInput
-                label="Discount rate"
-                suffix="% annual"
-                step={0.01}
-                value={Math.round(inp.discountRate * 10000) / 100}
-                onChange={(v) => setInp((s) => ({ ...s, discountRate: v / 100 }))}
-              />
+              <NumberInput label="Term" suffix="mo" value={inp.term} onChange={(v) => setInp((s) => ({ ...s, term: v }))} />
+              <NumberInput label="Units" value={inp.units} onChange={(v) => setInp((s) => ({ ...s, units: v }))} />
+              <NumberInput label="ARPU" suffix="$/unit/mo" step={0.01} value={inp.arpu} onChange={(v) => setInp((s) => ({ ...s, arpu: v }))} />
+              <NumberInput label="Upfront payment per unit" suffix="$" step={1} value={inp.upfrontPerUnit} onChange={(v) => setInp((s) => ({ ...s, upfrontPerUnit: v }))} />
+              <NumberInput label="TPMS amortization" suffix="mo" value={inp.amortTPMS} onChange={(v) => setInp((s) => ({ ...s, amortTPMS: v }))} />
+              <NumberInput label="Other HW amortization" suffix="mo" value={inp.amortOther} onChange={(v) => setInp((s) => ({ ...s, amortOther: v }))} />
+              <NumberInput label="TPMS capex" suffix="$/unit" value={inp.capexTPMS} onChange={(v) => setInp((s) => ({ ...s, capexTPMS: v }))} />
+              <NumberInput label="Other HW capex" suffix="$/unit" value={inp.capexOther} onChange={(v) => setInp((s) => ({ ...s, capexOther: v }))} />
+              <NumberInput label="Install capex" suffix="$/unit" value={inp.capexInstall} onChange={(v) => setInp((s) => ({ ...s, capexInstall: v }))} />
+              <NumberInput label="Airtime/data" suffix="$/unit/mo" step={0.01} value={inp.airtime} onChange={(v) => setInp((s) => ({ ...s, airtime: v }))} />
+              <NumberInput label="3P license" suffix="$/unit/mo" step={0.01} value={inp.thirdParty} onChange={(v) => setInp((s) => ({ ...s, thirdParty: v }))} />
+              <NumberInput label="MCF license" suffix="$/unit/mo" step={0.01} value={inp.mcfLicense} onChange={(v) => setInp((s) => ({ ...s, mcfLicense: v }))} />
+              <NumberInput label="People" suffix="$/unit/mo" step={0.01} value={inp.people} onChange={(v) => setInp((s) => ({ ...s, people: v }))} />
+              <NumberInput label="Warranty" suffix="$/unit/mo" step={0.01} value={inp.warranty} onChange={(v) => setInp((s) => ({ ...s, warranty: v }))} />
+              <NumberInput label="Discount rate" suffix="% annual" step={0.01} value={Math.round(inp.discountRate * 10000) / 100} onChange={(v) => setInp((s) => ({ ...s, discountRate: v / 100 }))} />
             </div>
           </CardContent>
         </Card>
 
-        {/* RIGHT — Metrics + Chart */}
         <div className="lg:col-span-2 space-y-6">
-          {/* Metrics */}
           <Card>
             <CardHeader>
               <CardTitle>Base Case</CardTitle>
             </CardHeader>
             <CardContent className="grid grid-cols-2 gap-6 md:grid-cols-5">
-              <div>
-                <div className="text-xs text-gray-500">NPV</div>
-                <div className="text-base font-semibold">{currency(metrics.npv)}</div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500">IRR (annual)</div>
-                <div className="text-base font-semibold">
-                  {metrics.irr == null ? "—" : pct(metrics.irr)}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500">Cumulative FCF</div>
-                <div className="text-base font-semibold">
-                  {currency(metrics.cumulativeFCF)}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500">Payback</div>
-                <div className="text-base font-semibold">
-                  {metrics.payback == null ? "—" : `${metrics.payback} mo`}
-                </div>
-              </div>
-              <div>
-                <div className="text-xs text-gray-500">Gross Margin</div>
-                <div className="text-base font-semibold">{pct(metrics.grossMarginPct)}</div>
-              </div>
+              <div><div className="text-xs text-gray-500">NPV</div><div className="text-base font-semibold">{currency(metrics.npv)}</div></div>
+              <div><div className="text-xs text-gray-500">IRR (annual)</div><div className="text-base font-semibold">{metrics.irr == null ? "—" : pct(metrics.irr)}</div></div>
+              <div><div className="text-xs text-gray-500">Cumulative FCF</div><div className="text-base font-semibold">{currency(metrics.cumulativeFCF)}</div></div>
+              <div><div className="text-xs text-gray-500">Payback</div><div className="text-base font-semibold">{metrics.payback == null ? "—" : `${metrics.payback} mo`}</div></div>
+              <div><div className="text-xs text-gray-500">Gross Margin</div><div className="text-base font-semibold">{pct(metrics.grossMarginPct)}</div></div>
             </CardContent>
           </Card>
 
-          {/* Chart */}
           <Card>
             <CardHeader>
               <CardTitle>Free Cash Flow — Monthly &amp; Cumulative</CardTitle>
@@ -446,28 +306,13 @@ export default function App() {
                   <YAxis />
                   <Tooltip />
                   <Legend />
-                  <Line
-                    type="monotone"
-                    dataKey="cumulative"
-                    name="Cumulative"
-                    stroke="#2563eb"
-                    strokeWidth={2}
-                    dot={false}
-                  />
-                  <Line
-                    type="monotone"
-                    dataKey="fcf"
-                    name="FCF"
-                    stroke="#16a34a"
-                    strokeWidth={2}
-                    dot={false}
-                  />
+                  <Line type="monotone" dataKey="cumulative" name="Cumulative" stroke="#2563eb" strokeWidth={2} dot={false} />
+                  <Line type="monotone" dataKey="fcf" name="FCF" stroke="#16a34a" strokeWidth={2} dot={false} />
                 </LineChart>
               </ResponsiveContainer>
             </CardContent>
           </Card>
 
-          {/* Monthly P&L (Accrual) + FCF */}
           <Card>
             <CardHeader>
               <CardTitle>Monthly P&amp;L (accrual) &amp; FCF</CardTitle>
